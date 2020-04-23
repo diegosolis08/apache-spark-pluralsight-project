@@ -1,6 +1,6 @@
 package main
 
-import org.apache.spark.sql.{SaveMode, SparkSession}
+import org.apache.spark.sql.{DataFrame, SaveMode, SparkSession}
 
 object Detector{
   def main(args: Array[String]) {
@@ -11,10 +11,22 @@ object Detector{
                             .enableHiveSupport()
                             .getOrCreate()
     import spark.implicits._
-    spark.read.json("Data/finances-small.json")
-         .na.drop("all")
+    val financesDF = spark.read.json("Data/finances-small.json").cache()
+    financesDF
+         .na.drop("all", Seq("ID", "Account", "Amount", "Description", "Date"))
          .na.fill("Unknown", Seq("Description"))
          .where($"Amount" =!= 0 || $"Description" === "Unknown")
+         .selectExpr("Account.Number as AccountNumber", "Amount", "Date", "Description")
          .write.mode(SaveMode.Overwrite).parquet("Output/finances-small")
+    
+    if (financesDF.hasColumn("_corrupt_record")) {
+      financesDF.where($"_corrupt_record".isNotNull).select($"_corrupt_record")
+                .write.mode(SaveMode.Overwrite).text("Output/corrupt-finances")
+    }
+  }
+
+  implicit class DataFrameHelper(df: DataFrame) {
+    import scala.util.Try
+    def hasColumn(columnName: String) = Try(df(columnName)).isSuccess
   }
 }
