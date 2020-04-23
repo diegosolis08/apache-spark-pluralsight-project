@@ -1,5 +1,7 @@
 target/
 Output/
+metastore_db/
 .bloop/
 .metals/
 .DS_Store
+derby.log
