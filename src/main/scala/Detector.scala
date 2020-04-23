@@ -20,19 +20,36 @@ object Detector{
          .selectExpr("Account.Number as AccountNumber", "Amount", "Date", "Description")
          .write.mode(SaveMode.Overwrite).parquet("Output/finances-small")
     
+    // Output the records that are corrupt
     if (financesDF.hasColumn("_corrupt_record")) {
       financesDF.where($"_corrupt_record".isNotNull).select($"_corrupt_record")
                 .write.mode(SaveMode.Overwrite).text("Output/corrupt-finances")
     }
 
+    // Query to get account full name and account number
     financesDF
           .select(concat($"Account.FirstName", lit(" "), $"Account.LastName").as("FullName"),
                   $"Account.Number".as("AccountNumber"))
           .distinct
           .coalesce(5)
           .write.mode(SaveMode.Overwrite).json("Output/finances-small-accounts")
+    
+    // Query to get account details
+    financesDF
+          .select($"Account.Number".as("AccountNumber"), $"Amount", $"Description", $"Date")
+          .groupBy($"AccountNumber")
+          .agg(avg($"Amount").as("AverageTransaction"),
+               sum($"Amount").as("TotalTransactions"),
+               count($"Amount").as("NumberOfTransactions"),
+               max($"Amount").as("MaxTransaction"),
+               min($"Amount").as("MinTransaction"),
+               stddev($"Amount").as("StandardDeviationAmount"),
+               collect_set($"Description").as("UniqueTransactionDescriptions"))
+          .coalesce(5)
+          .write.mode(SaveMode.Overwrite).json("Output/finances-small-account-details")
   }
 
+  // Implicit class to add the hasColumn method available to DataFrame
   implicit class DataFrameHelper(df: DataFrame) {
     import scala.util.Try
     def hasColumn(columnName: String) = Try(df(columnName)).isSuccess
