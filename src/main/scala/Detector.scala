@@ -1,6 +1,7 @@
 package main
 
 import org.apache.spark.sql.{DataFrame, SaveMode, SparkSession}
+import org.apache.spark.sql.functions._
 
 object Detector{
   def main(args: Array[String]) {
@@ -23,6 +24,13 @@ object Detector{
       financesDF.where($"_corrupt_record".isNotNull).select($"_corrupt_record")
                 .write.mode(SaveMode.Overwrite).text("Output/corrupt-finances")
     }
+
+    financesDF
+          .select(concat($"Account.FirstName", lit(" "), $"Account.LastName").as("FullName"),
+                  $"Account.Number".as("AccountNumber"))
+          .distinct
+          .coalesce(5)
+          .write.mode(SaveMode.Overwrite).json("Output/finances-small-accounts")
   }
 
   implicit class DataFrameHelper(df: DataFrame) {
