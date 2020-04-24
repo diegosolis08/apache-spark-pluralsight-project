@@ -2,6 +2,7 @@ package main
 
 import org.apache.spark.sql.{DataFrame, SaveMode, SparkSession}
 import org.apache.spark.sql.functions._
+import org.apache.spark.sql.expressions.Window
 
 object Detector{
   def main(args: Array[String]) {
@@ -13,11 +14,19 @@ object Detector{
                             .getOrCreate()
     import spark.implicits._
     val financesDF = spark.read.json("Data/finances-small.json").cache()
+
+    val accountNumberPrevious4WindowSpec = Window.partitionBy($"AccountNumber").orderBy($"Date").rowsBetween(-4, 0)
+    val rollingAvgForPrevious4PerAccount = avg($"Amount").over(accountNumberPrevious4WindowSpec)
+
     financesDF
          .na.drop("all", Seq("ID", "Account", "Amount", "Description", "Date"))
          .na.fill("Unknown", Seq("Description"))
          .where($"Amount" =!= 0 || $"Description" === "Unknown")
-         .selectExpr("Account.Number as AccountNumber", "Amount", "Date", "Description")
+         .selectExpr("Account.Number as AccountNumber", 
+                     "Amount", 
+                     "to_date(cast(unix_timestamp(Date, 'MM/dd/yyyy') AS TIMESTAMP)) AS Date", 
+                     "Description")
+         .withColumn("RollingAverage", rollingAvgForPrevious4PerAccount)
          .write.mode(SaveMode.Overwrite).parquet("Output/finances-small")
     
     // Output the records that are corrupt
@@ -36,7 +45,10 @@ object Detector{
     
     // Query to get account details
     financesDF
-          .select($"Account.Number".as("AccountNumber"), $"Amount", $"Description", $"Date")
+          .select($"Account.Number".as("AccountNumber"), 
+                  $"Amount", 
+                  $"Description", 
+                  to_date(unix_timestamp($"Date", "MM/dd/yyyy").cast("timestamp")).as("Date"))
           .groupBy($"AccountNumber")
           .agg(avg($"Amount").as("AverageTransaction"),
                sum($"Amount").as("TotalTransactions"),
