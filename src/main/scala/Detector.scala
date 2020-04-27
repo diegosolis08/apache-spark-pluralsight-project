@@ -60,14 +60,14 @@ object Detector{
                   $"Amount".as[Double], 
                   $"Description".as[String],
                   $"Date".as[java.sql.Date](Encoders.DATE)).as[TransactionForAverage]
-          .groupByKey(_.accountNumber)
-          .agg(typed.avg[TransactionForAverage](_.amount).as("AverageTransaction").as[Double],
-               typed.sum[TransactionForAverage](_.amount)/*.as("TotalTransactions")*/,
-               typed.count[TransactionForAverage](_.amount)/*.as("NumberOfTransactions")*/,
-               max($"Amount").as("MaxTransaction").as[Double]/*, // This method has a limit of 4 parameters
-               min($"Amount").as("MinTransaction").as[Double],
-               stddev($"Amount").as("StandardDeviationAmount").as[Double],
-               collect_set($"Description").as("UniqueTransactionDescriptions")*/)
+          .groupBy($"AccountNumber")
+          .agg(avg($"Amount").as("AverageTransaction"),
+               sum($"Amount").as("TotalTransactions"),
+               count($"Amount").as("NumberOfTransactions"),
+               max($"Amount").as("MaxTransaction"),
+               min($"Amount").as("MinTransaction"),
+               stddev($"Amount").as("StandardDeviationAmount"),
+               collect_set($"Description").as("UniqueTransactionDescriptions"))
           .coalesce(5)
           .write.mode(SaveMode.Overwrite).json("Output/finances-small-account-details")
   }
