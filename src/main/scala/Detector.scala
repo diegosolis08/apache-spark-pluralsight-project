@@ -5,6 +5,11 @@ import org.apache.spark.sql.functions._
 import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.expressions.scalalang.typed
 import org.apache.spark.sql.cassandra._
+import org.apache.spark.streaming._
+import org.apache.spark.streaming.kafka010._
+import org.apache.kafka.common.serialization.StringDeserializer
+import org.apache.spark.streaming.kafka010.LocationStrategies.PreferConsistent
+import org.apache.spark.streaming.kafka010.ConsumerStrategies.Subscribe
 
 case class Account(number: String, firstName: String, lastName: String)
 
@@ -15,7 +20,7 @@ case class TransactionForAverage(accountNumber: String, amount: Double, descript
 object Detector{
   def main(args: Array[String]) {
     val spark = SparkSession.builder
-                            .master("local")
+                            .master("local[3]") // more workers needed for additional streaming receivers
                             .appName("Fraud Detector")
                             .config("spark.driver.memory", "2g")
                             .config("spark.cassandra.connection.host", "localhost")
@@ -77,6 +82,25 @@ object Detector{
           .cassandraFormat("account_aggregates", "finances")
           // .options(Map("keyspace" -> "finances", "table" -> "account_aggregates")) // this is another way to specify Cassandra details
           .save
+    val streamingContext = new StreamingContext(spark.sparkContext, Seconds(1))
+    val kafkaParams = Map[String, Object] (
+      "bootstrap.servers" -> "localhost:9092",
+      "key.deserializer" -> classOf[StringDeserializer],
+      "value.deserializer" -> classOf[StringDeserializer],
+      "group.id" -> "test-group",
+      "auto.offset.reset" -> "latest",
+      "enable.auto.commit" -> (false: java.lang.Boolean)
+    )
+    val topics = Array("test")
+    val kafkaStream = KafkaUtils.createDirectStream[String, String](
+      streamingContext,
+      PreferConsistent,
+      Subscribe[String, String](topics, kafkaParams)
+    )
+
+    kafkaStream.map(record => (record.key(), record.value())).print()
+    streamingContext.start()
+    streamingContext.awaitTermination()
   }
 
   // Implicit class to add the hasColumn method available to DataFrame
