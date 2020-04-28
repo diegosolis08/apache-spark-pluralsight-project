@@ -25,6 +25,7 @@ version := "1.0"
 // You can define other libraries as dependencies in your build like this:
 libraryDependencies += "org.apache.spark" %% "spark-core" % "2.4.5" % "provided"
 libraryDependencies += "org.apache.spark" %% "spark-sql" % "2.4.5" % "provided"
+libraryDependencies += "com.datastax.spark" %% "spark-cassandra-connector" % "2.4.3"
 // Here, `libraryDependencies` is a set of dependencies, and by using `+=`,
 // we're adding the cats dependency to the set of dependencies that sbt will go
 // and fetch when it starts up.
@@ -73,3 +74,6 @@ libraryDependencies += "org.apache.spark" %% "spark-sql" % "2.4.5" % "provided"
 
 // To learn more about multi-project builds, head over to the official sbt
 // documentation at http://www.scala-sbt.org/documentation.html
+
+assemblyJarName in assembly := s"${name.value.replace(' ', '-')}-${version.value}.jar"
+assemblyOption in assembly := (assemblyOption in assembly).value.copy(includeScala = false)

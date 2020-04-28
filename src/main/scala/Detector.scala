@@ -4,6 +4,7 @@ import org.apache.spark.sql.{Dataset, Encoders, SaveMode, SparkSession}
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.expressions.scalalang.typed
+import org.apache.spark.sql.cassandra._
 
 case class Account(number: String, firstName: String, lastName: String)
 
@@ -17,6 +18,7 @@ object Detector{
                             .master("local")
                             .appName("Fraud Detector")
                             .config("spark.driver.memory", "2g")
+                            .config("spark.cassandra.connection.host", "localhost")
                             .enableHiveSupport()
                             .getOrCreate()
     import spark.implicits._
@@ -61,15 +63,20 @@ object Detector{
                   $"Description".as[String],
                   $"Date".as[java.sql.Date](Encoders.DATE)).as[TransactionForAverage]
           .groupBy($"AccountNumber")
-          .agg(avg($"Amount").as("AverageTransaction"),
-               sum($"Amount").as("TotalTransactions"),
-               count($"Amount").as("NumberOfTransactions"),
-               max($"Amount").as("MaxTransaction"),
-               min($"Amount").as("MinTransaction"),
-               stddev($"Amount").as("StandardDeviationAmount"),
-               collect_set($"Description").as("UniqueTransactionDescriptions"))
+          .agg(avg($"Amount").as("average_transaction"),
+               sum($"Amount").as("total_transactions"),
+               count($"Amount").as("number_of_transactions"),
+               max($"Amount").as("max_transaction"),
+               min($"Amount").as("min_transaction"),
+               stddev($"Amount").as("standard_deviation_amount"),
+               collect_set($"Description").as("unique_transaction_descriptions"))
+          .withColumnRenamed("AccountNumber", "account_number")
           .coalesce(5)
-          .write.mode(SaveMode.Overwrite).json("Output/finances-small-account-details")
+          .write.mode(SaveMode.Append)
+          .format("org.apache.spark.sql.cassandra")
+          .cassandraFormat("account_aggregates", "finances")
+          // .options(Map("keyspace" -> "finances", "table" -> "account_aggregates")) // this is another way to specify Cassandra details
+          .save
   }
 
   // Implicit class to add the hasColumn method available to DataFrame
