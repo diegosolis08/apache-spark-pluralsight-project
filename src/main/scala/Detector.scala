@@ -10,12 +10,18 @@ import org.apache.spark.streaming.kafka010._
 import org.apache.kafka.common.serialization.StringDeserializer
 import org.apache.spark.streaming.kafka010.LocationStrategies.PreferConsistent
 import org.apache.spark.streaming.kafka010.ConsumerStrategies.Subscribe
+import com.datastax.spark.connector._
+import com.datastax.spark.connector.streaming._
 
 case class Account(number: String, firstName: String, lastName: String)
 
 case class Transaction(id: Long, account: Account, date: java.sql.Date, amount: Double, description: String)
 
 case class TransactionForAverage(accountNumber: String, amount: Double, description: String, date: java.sql.Date)
+
+case class SimpleTransaction(id: Long, account_number: String, amount: Double, date: java.sql.Date, description: String)
+
+case class UnparseableTransaction(id: Option[Long], originalMessage: String, exception: Throwable)
 
 object Detector{
   def main(args: Array[String]) {
@@ -87,20 +93,45 @@ object Detector{
       "bootstrap.servers" -> "localhost:9092",
       "key.deserializer" -> classOf[StringDeserializer],
       "value.deserializer" -> classOf[StringDeserializer],
-      "group.id" -> "test-group",
+      "group.id" -> "transactions-group",
       "auto.offset.reset" -> "latest",
       "enable.auto.commit" -> (false: java.lang.Boolean)
     )
-    val topics = Array("test")
+    val topics = Array("transactions")
     val kafkaStream = KafkaUtils.createDirectStream[String, String](
       streamingContext,
       PreferConsistent,
       Subscribe[String, String](topics, kafkaParams)
     )
 
-    kafkaStream.map(record => (record.key(), record.value())).print()
+    // kafkaStream.map(record => (record.key(), record.value())).print()
+    kafkaStream.map(record => tryConversionToSimpleTransaction(record.value()))
+                                .flatMap(_.right.toOption)
+                                // .foreachRDD(txRDD => txRDD.saveToCassandra("finances", "transactions"))
+                                .saveToCassandra("finances", "transactions")
     streamingContext.start()
     streamingContext.awaitTermination()
+  }
+
+  import scala.util.{Either, Right, Left}
+  def tryConversionToSimpleTransaction(logLine: String): Either[UnparseableTransaction, SimpleTransaction] = {
+    import java.text.SimpleDateFormat
+    import scala.util.control.NonFatal
+    logLine.split(',') match {
+      case Array(id, date, acctNum, amt, desc) =>
+        var parseId: Option[Long] = None
+        try {
+          parseId = Some(id.toLong)
+          Right(SimpleTransaction(parseId.get, 
+                                  acctNum, 
+                                  amt.toDouble, 
+                                  new java.sql.Date((new SimpleDateFormat("MM/dd/yyyy")).parse(date).getTime()),
+                                  desc
+                                ))
+        } catch {
+          case NonFatal(exception) => Left(UnparseableTransaction(parseId, logLine, exception))
+        }
+    }
   }
 
   // Implicit class to add the hasColumn method available to DataFrame
