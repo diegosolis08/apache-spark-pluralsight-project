@@ -5,3 +5,4 @@ metastore_db/
 .metals/
 .DS_Store
 derby.log
+.scalafmt.conf
