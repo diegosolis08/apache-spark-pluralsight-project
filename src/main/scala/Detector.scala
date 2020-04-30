@@ -12,109 +12,217 @@ import org.apache.spark.streaming.kafka010.LocationStrategies.PreferConsistent
 import org.apache.spark.streaming.kafka010.ConsumerStrategies.Subscribe
 import com.datastax.spark.connector._
 import com.datastax.spark.connector.streaming._
+import org.apache.spark.rdd.RDD
 
 case class Account(number: String, firstName: String, lastName: String)
 
-case class Transaction(id: Long, account: Account, date: java.sql.Date, amount: Double, description: String)
+case class Transaction(
+    id: Long,
+    account: Account,
+    date: java.sql.Date,
+    amount: Double,
+    description: String
+)
 
-case class TransactionForAverage(accountNumber: String, amount: Double, description: String, date: java.sql.Date)
+case class TransactionForAverage(
+    accountNumber: String,
+    amount: Double,
+    description: String,
+    date: java.sql.Date
+)
 
-case class SimpleTransaction(id: Long, account_number: String, amount: Double, date: java.sql.Date, description: String)
+case class SimpleTransaction(
+    id: Long,
+    account_number: String,
+    amount: Double,
+    date: java.sql.Date,
+    description: String
+)
 
-case class UnparseableTransaction(id: Option[Long], originalMessage: String, exception: Throwable)
+case class UnparseableTransaction(
+    id: Option[Long],
+    originalMessage: String,
+    exception: Throwable
+)
 
-object Detector{
+case class AggregateData(
+    totalSpending: Double,
+    numTx: Int,
+    windowSpendingAvg: Double
+) {
+  val averageTx = if (numTx > 0) totalSpending / numTx else 0
+}
+
+case class EvaluatedSimpleTransaction(
+    tx: SimpleTransaction,
+    isPossibleFraud: Boolean
+)
+
+object Detector {
   def main(args: Array[String]) {
     val spark = SparkSession.builder
-                            .master("local[3]") // more workers needed for additional streaming receivers
-                            .appName("Fraud Detector")
-                            .config("spark.driver.memory", "2g")
-                            .config("spark.cassandra.connection.host", "localhost")
-                            .enableHiveSupport()
-                            .getOrCreate()
+      .master(
+        "local[3]"
+      ) // more workers needed for additional streaming receivers
+      .appName("Fraud Detector")
+      .config("spark.driver.memory", "2g")
+      .config("spark.cassandra.connection.host", "localhost")
+      .enableHiveSupport()
+      .getOrCreate()
     import spark.implicits._
-    val financesDS = spark.read.json("Data/finances-small.json")
-                          .withColumn("Date", to_date(unix_timestamp($"Date", "MM/dd/yyyy").cast("timestamp")))
-                          .as[Transaction]
-                          .cache()
+    val financesDS = spark.read
+      .json("Data/finances-small.json")
+      .withColumn(
+        "Date",
+        to_date(unix_timestamp($"Date", "MM/dd/yyyy").cast("timestamp"))
+      )
+      .as[Transaction]
+      .cache()
 
-    val accountNumberPrevious4WindowSpec = Window.partitionBy($"AccountNumber").orderBy($"Date").rowsBetween(-4, 0)
-    val rollingAvgForPrevious4PerAccount = avg($"Amount").over(accountNumberPrevious4WindowSpec)
+    val accountNumberPrevious4WindowSpec =
+      Window.partitionBy($"AccountNumber").orderBy($"Date").rowsBetween(-4, 0)
+    val rollingAvgForPrevious4PerAccount =
+      avg($"Amount").over(accountNumberPrevious4WindowSpec)
 
-    financesDS
-         .na.drop("all", Seq("ID", "Account", "Amount", "Description", "Date"))
-         .na.fill("Unknown", Seq("Description")).as[Transaction]
-        //  .filter(tx => (tx.amount != 0 || tx.description == "Unknown")) // This is the DS way to express the where, but it is not optimized by the Catalyst
-         .where($"Amount" =!= 0 || $"Description" === "Unknown")
-         .select($"Account.Number".as("AccountNumber").as[String], 
-                 $"Amount".as[Double], 
-                 $"Date".as[java.sql.Date](Encoders.DATE), 
-                 $"Description".as[String])
-         .withColumn("RollingAverage", rollingAvgForPrevious4PerAccount)
-         .write.mode(SaveMode.Overwrite).parquet("Output/finances-small")
-    
+    financesDS.na
+      .drop("all", Seq("ID", "Account", "Amount", "Description", "Date"))
+      .na
+      .fill("Unknown", Seq("Description"))
+      .as[Transaction]
+      .where($"Amount" =!= 0 || $"Description" === "Unknown")
+      .select(
+        $"Account.Number".as("AccountNumber").as[String],
+        $"Amount".as[Double],
+        $"Date".as[java.sql.Date](Encoders.DATE),
+        $"Description".as[String]
+      )
+      .withColumn("RollingAverage", rollingAvgForPrevious4PerAccount)
+      .write
+      .mode(SaveMode.Overwrite)
+      .parquet("Output/finances-small")
+
     // Output the records that are corrupt
     if (financesDS.hasColumn("_corrupt_record")) {
-      financesDS.where($"_corrupt_record".isNotNull).select($"_corrupt_record")
-                .write.mode(SaveMode.Overwrite).text("Output/corrupt-finances")
+      financesDS
+        .where($"_corrupt_record".isNotNull)
+        .select($"_corrupt_record")
+        .write
+        .mode(SaveMode.Overwrite)
+        .text("Output/corrupt-finances")
     }
 
     // Query to get account full name and account number
-    financesDS          
-          .map(tx => (s"${tx.account.firstName} ${tx.account.lastName}", tx.account.number))
-          .distinct
-          .toDF("FullName", "AccountNumber")
-          .coalesce(5)
-          .write.mode(SaveMode.Overwrite).json("Output/finances-small-accounts")
-    
+    financesDS
+      .map(tx =>
+        (s"${tx.account.firstName} ${tx.account.lastName}", tx.account.number)
+      )
+      .distinct
+      .toDF("FullName", "AccountNumber")
+      .coalesce(5)
+      .write
+      .mode(SaveMode.Overwrite)
+      .json("Output/finances-small-accounts")
+
     // Query to get account details
     financesDS
-          .select($"Account.Number".as("AccountNumber").as[String], 
-                  $"Amount".as[Double], 
-                  $"Description".as[String],
-                  $"Date".as[java.sql.Date](Encoders.DATE)).as[TransactionForAverage]
-          .groupBy($"AccountNumber")
-          .agg(avg($"Amount").as("average_transaction"),
-               sum($"Amount").as("total_transactions"),
-               count($"Amount").as("number_of_transactions"),
-               max($"Amount").as("max_transaction"),
-               min($"Amount").as("min_transaction"),
-               stddev($"Amount").as("standard_deviation_amount"),
-               collect_set($"Description").as("unique_transaction_descriptions"))
-          .withColumnRenamed("AccountNumber", "account_number")
-          .coalesce(5)
-          .write.mode(SaveMode.Append)
-          .format("org.apache.spark.sql.cassandra")
-          .cassandraFormat("account_aggregates", "finances")
-          // .options(Map("keyspace" -> "finances", "table" -> "account_aggregates")) // this is another way to specify Cassandra details
-          .save
-    val streamingContext = new StreamingContext(spark.sparkContext, Seconds(1))
-    val kafkaParams = Map[String, Object] (
-      "bootstrap.servers" -> "localhost:9092",
-      "key.deserializer" -> classOf[StringDeserializer],
-      "value.deserializer" -> classOf[StringDeserializer],
-      "group.id" -> "transactions-group",
-      "auto.offset.reset" -> "latest",
-      "enable.auto.commit" -> (false: java.lang.Boolean)
-    )
-    val topics = Array("transactions")
-    val kafkaStream = KafkaUtils.createDirectStream[String, String](
-      streamingContext,
-      PreferConsistent,
-      Subscribe[String, String](topics, kafkaParams)
+      .select(
+        $"Account.Number".as("AccountNumber").as[String],
+        $"Amount".as[Double],
+        $"Description".as[String],
+        $"Date".as[java.sql.Date](Encoders.DATE)
+      )
+      .as[TransactionForAverage]
+      .groupBy($"AccountNumber")
+      .agg(
+        avg($"Amount").as("average_transaction"),
+        sum($"Amount").as("total_transactions"),
+        count($"Amount").as("number_of_transactions"),
+        max($"Amount").as("max_transaction"),
+        min($"Amount").as("min_transaction"),
+        stddev($"Amount").as("standard_deviation_amount"),
+        collect_set($"Description").as("unique_transaction_descriptions")
+      )
+      .withColumnRenamed("AccountNumber", "account_number")
+      .coalesce(5)
+      .write
+      .mode(SaveMode.Append)
+      .format("org.apache.spark.sql.cassandra")
+      .cassandraFormat("account_aggregates", "finances")
+      .save
+
+    // Setup the streaming behaviour
+    val checkPointDir =
+      "file:///Users/diegosolis/Documents/learning/spark/apache-spark-pluralsight/detector-checkpoint"
+
+    val streamingContext = StreamingContext.getOrCreate(
+      checkPointDir,
+      () => {
+        val ssc = new StreamingContext(spark.sparkContext, Seconds(5))
+        ssc.checkpoint(checkPointDir)
+        val kafkaParams = Map[String, Object](
+          "bootstrap.servers" -> "localhost:9092",
+          "key.deserializer" -> classOf[StringDeserializer],
+          "value.deserializer" -> classOf[StringDeserializer],
+          "group.id" -> "transactions-group",
+          "auto.offset.reset" -> "latest",
+          "enable.auto.commit" -> (false: java.lang.Boolean)
+        )
+        val topics = Array("transactions")
+        val kafkaStream = KafkaUtils.createDirectStream[String, String](
+          ssc,
+          PreferConsistent,
+          Subscribe[String, String](topics, kafkaParams)
+        )
+
+        kafkaStream
+          .map(record => tryConversionToSimpleTransaction(record.value()))
+          .flatMap(_.right.toOption)
+          .map(simpleTx => (simpleTx.account_number, simpleTx))
+          .window(Seconds(10), Seconds(10))
+          .updateStateByKey[AggregateData]((newTx: Seq[SimpleTransaction], oldAggDataOption: Option[AggregateData]) => {
+            val calculatedAggTuple = newTx.foldLeft((0.0, 0))((curAgg, tx) => (curAgg._1 + tx.amount, curAgg._2 + 1))
+            val calculatedAgg = AggregateData(calculatedAggTuple._1, calculatedAggTuple._2, if(calculatedAggTuple._2 > 0) calculatedAggTuple._1 / calculatedAggTuple._2 else 0)
+            Option(oldAggDataOption match {
+              case Some(aggData) => AggregateData(aggData.totalSpending + calculatedAgg.totalSpending, aggData.numTx + calculatedAgg.numTx, calculatedAgg.windowSpendingAvg)
+              case None => calculatedAgg
+            })
+          })
+          .transform((dStreamRDD: RDD[(String, AggregateData)]) => {
+            val sc = dStreamRDD.sparkContext
+            val historicAggOption = sc.getPersistentRDDs
+                                      .values
+                                      .filter(_.name == "storedHistoric")
+                                      .headOption
+            val historicAggs = historicAggOption match {
+              case Some(persistedHistoricAggs) => persistedHistoricAggs.asInstanceOf[org.apache.spark.rdd.RDD[(String, Double)]]
+              case None => {
+                import com.datastax.spark.connector._
+                val retrievedHistoricAggs = sc.cassandraTable("finances", "account_aggregates")
+                                              .select("account_number", "average_transaction")
+                                              .map(cassandraRow => (cassandraRow.get[String]("account_number"),
+                                                                    cassandraRow.get[Double]("average_transaction")))
+                retrievedHistoricAggs.setName("storedHistoric")
+                retrievedHistoricAggs.cache()
+              }
+            }
+            dStreamRDD.join(historicAggs)
+          })
+          .filter{ case (acctNum, (aggData, historicAvg)) =>
+            aggData.averageTx - historicAvg > 2000 || aggData.windowSpendingAvg - historicAvg > 2000
+          }
+          .print()
+          ssc
+      }
     )
 
-    // kafkaStream.map(record => (record.key(), record.value())).print()
-    kafkaStream.map(record => tryConversionToSimpleTransaction(record.value()))
-                                .flatMap(_.right.toOption)
-                                // .foreachRDD(txRDD => txRDD.saveToCassandra("finances", "transactions"))
-                                .saveToCassandra("finances", "transactions")
     streamingContext.start()
     streamingContext.awaitTermination()
   }
 
   import scala.util.{Either, Right, Left}
-  def tryConversionToSimpleTransaction(logLine: String): Either[UnparseableTransaction, SimpleTransaction] = {
+  def tryConversionToSimpleTransaction(
+      logLine: String
+  ): Either[UnparseableTransaction, SimpleTransaction] = {
     import java.text.SimpleDateFormat
     import scala.util.control.NonFatal
     logLine.split(',') match {
@@ -122,19 +230,25 @@ object Detector{
         var parseId: Option[Long] = None
         try {
           parseId = Some(id.toLong)
-          Right(SimpleTransaction(parseId.get, 
-                                  acctNum, 
-                                  amt.toDouble, 
-                                  new java.sql.Date((new SimpleDateFormat("MM/dd/yyyy")).parse(date).getTime()),
-                                  desc
-                                ))
+          Right(
+            SimpleTransaction(
+              parseId.get,
+              acctNum,
+              amt.toDouble,
+              new java.sql.Date(
+                (new SimpleDateFormat("MM/dd/yyyy")).parse(date).getTime()
+              ),
+              desc
+            )
+          )
         } catch {
-          case NonFatal(exception) => Left(UnparseableTransaction(parseId, logLine, exception))
+          case NonFatal(exception) =>
+            Left(UnparseableTransaction(parseId, logLine, exception))
         }
     }
   }
 
-  // Implicit class to add the hasColumn method available to DataFrame
+  // Implicit class to add the hasColumn method available to DataSet
   implicit class DataSetHelper[T](ds: Dataset[T]) {
     import scala.util.Try
     def hasColumn(columnName: String) = Try(ds(columnName)).isSuccess
